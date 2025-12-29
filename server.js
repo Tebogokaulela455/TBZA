@@ -6,7 +6,7 @@ const bcrypt = require('bcrypt');
 
 const app = express();
 app.use(cors()); 
-app.use(express.json({ limit: '50mb' })); // Increased limit for logo/signature uploads
+app.use(express.json({ limit: '50mb' })); 
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 const pool = mysql.createPool({
@@ -19,27 +19,15 @@ const pool = mysql.createPool({
 });
 const db = pool.promise();
 
-// --- NEW: FETCH ALL COURSES FOR STUDENT DASHBOARD ---
+// --- FETCH ALL COURSES ---
 app.get('/courses', async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM courses ORDER BY id DESC');
         res.json(rows);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// --- NEW: BRANDING (LOGO & SIGNATURE) ---
-app.post('/admin/branding', async (req, res) => {
-    const { logo, signature } = req.body;
-    try {
-        // We store this in a settings table or simple file; here we'll assume a 'branding' table exists
-        await db.query('REPLACE INTO settings (id, setting_key, setting_value) VALUES (1, "logo", ?), (2, "signature", ?)', [logo, signature]);
-        res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- UPDATED: CREATE COURSE (Includes Quizzes) ---
+// --- CREATE COURSE (GRADUATE & AI) ---
 app.post('/courses/create', async (req, res) => {
     const { title, type, creatorId, price, contentData, quizzes } = req.body;
     try {
@@ -49,7 +37,6 @@ app.post('/courses/create', async (req, res) => {
         );
         const courseId = courseResult.insertId;
 
-        // Save Course Content
         for (const mod of contentData) {
             const [modResult] = await db.query('INSERT INTO course_modules (course_id, module_title) VALUES (?, ?)', [courseId, mod.title]);
             for (const unit of mod.units) {
@@ -57,7 +44,6 @@ app.post('/courses/create', async (req, res) => {
             }
         }
 
-        // Save Quizzes
         if (quizzes && quizzes.length > 0) {
             for (const q of quizzes) {
                 await db.query('INSERT INTO quizzes (course_id, question, options, correct_answer) VALUES (?, ?, ?, ?)', 
@@ -68,8 +54,13 @@ app.post('/courses/create', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- LOGIN & REGISTER (Keep your existing routes here) ---
-// ... (Login and Register routes from your snippet)
+// --- BRANDING ---
+app.post('/admin/branding', async (req, res) => {
+    const { logo, signature } = req.body;
+    try {
+        await db.query('REPLACE INTO settings (id, setting_key, setting_value) VALUES (1, "logo", ?), (2, "signature", ?)', [logo, signature]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(process.env.PORT || 3000, () => console.log(`🚀 Server on tbza-7 active`));
