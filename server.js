@@ -2,12 +2,13 @@ require('dotenv').config();
 const express = require('express');
 const mysql = require('mysql2');
 const cors = require('cors');
-const bcrypt = require('bcrypt');
 
 const app = express();
-app.use(cors()); 
-app.use(express.json({ limit: '50mb' })); 
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+
+console.log("--- System Booting ---");
+console.log("Target Host:", process.env.DB_HOST); // This will confirm if Render sees your variables
 
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
@@ -15,52 +16,34 @@ const pool = mysql.createPool({
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
     port: process.env.DB_PORT || 4000,
-    ssl: { rejectUnauthorized: false } 
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+    ssl: {
+        rejectUnauthorized: false // Required for TiDB Cloud
+    },
+    connectTimeout: 20000 // Give it 20 seconds to find the cloud
 });
+
 const db = pool.promise();
 
-// --- FETCH ALL COURSES ---
-app.get('/courses', async (req, res) => {
+// FORCE A CONNECTION TEST IMMEDIATELY
+async function testConnection() {
     try {
-        const [rows] = await db.query('SELECT * FROM courses ORDER BY id DESC');
-        res.json(rows);
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
+        console.log("⏳ Attempting to ping TiDB Cloud...");
+        const [rows] = await db.query('SELECT 1 + 1 AS result');
+        console.log("✅ DATABASE CONNECTED SUCCESSFULLY. Test Query Result:", rows[0].result);
+    } catch (err) {
+        console.error("❌ DATABASE CONNECTION FAILED!");
+        console.error("Error Code:", err.code);
+        console.error("Error Message:", err.message);
+        console.error("Check if your IP Whitelist (0.0.0.0/0) is set in TiDB Dashboard.");
+    }
+}
 
-// --- CREATE COURSE (GRADUATE & AI) ---
-app.post('/courses/create', async (req, res) => {
-    const { title, type, creatorId, price, contentData, quizzes } = req.body;
-    try {
-        const [courseResult] = await db.query(
-            'INSERT INTO courses (title, type, creator_id, price) VALUES (?, ?, ?, ?)', 
-            [title, type, creatorId, price]
-        );
-        const courseId = courseResult.insertId;
+testConnection();
 
-        for (const mod of contentData) {
-            const [modResult] = await db.query('INSERT INTO course_modules (course_id, module_title) VALUES (?, ?)', [courseId, mod.title]);
-            for (const unit of mod.units) {
-                await db.query('INSERT INTO study_units (module_id, unit_title, content) VALUES (?, ?, ?)', [modResult.insertId, unit.title, unit.content]);
-            }
-        }
+// ... rest of your routes (login, register, courses/create) ...
 
-        if (quizzes && quizzes.length > 0) {
-            for (const q of quizzes) {
-                await db.query('INSERT INTO quizzes (course_id, question, options, correct_answer) VALUES (?, ?, ?, ?)', 
-                    [courseId, q.question, JSON.stringify(q.options), q.correct]);
-            }
-        }
-        res.json({ success: true, courseId });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// --- BRANDING ---
-app.post('/admin/branding', async (req, res) => {
-    const { logo, signature } = req.body;
-    try {
-        await db.query('REPLACE INTO settings (id, setting_key, setting_value) VALUES (1, "logo", ?), (2, "signature", ?)', [logo, signature]);
-        res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.listen(process.env.PORT || 3000, () => console.log(`🚀 Server on tbza-7 active`));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Server listening on Port ${PORT}`));
