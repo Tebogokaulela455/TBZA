@@ -87,7 +87,7 @@ app.get('/all-courses', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- APPROVAL ROUTE (THE KEY TO SHOWING COURSES TO STUDENTS) ---
+// --- APPROVAL ROUTE ---
 app.post('/approve-course', async (req, res) => {
     const { courseId } = req.body;
     try {
@@ -96,12 +96,41 @@ app.post('/approve-course', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- STUDENT DASHBOARD ROUTE (ONLY SHOWS APPROVED) ---
+// --- STUDENT DASHBOARD ROUTE ---
 app.get('/available-courses', async (req, res) => {
     try {
         const [rows] = await pool.query(`SELECT * FROM courses WHERE is_approved = 1 ORDER BY id DESC`);
         res.json(rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- NEW: DELETE COURSE FEATURE (WITH CASCADE LOGIC) ---
+app.post('/delete-course', async (req, res) => {
+    const { courseId } = req.body;
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // 1. Delete Study Units belonging to Modules of this course
+        await connection.query(`
+            DELETE FROM study_units 
+            WHERE module_id IN (SELECT id FROM modules WHERE course_id = ?)
+        `, [courseId]);
+
+        // 2. Delete Modules belonging to this course
+        await connection.query(`DELETE FROM modules WHERE course_id = ?`, [courseId]);
+
+        // 3. Finally, delete the course itself
+        await connection.query(`DELETE FROM courses WHERE id = ?`, [courseId]);
+
+        await connection.commit();
+        res.json({ success: true, message: "Course and all related data deleted." });
+    } catch (err) {
+        await connection.rollback();
+        res.status(500).json({ success: false, error: err.message });
+    } finally {
+        connection.release();
+    }
 });
 
 const PORT = process.env.PORT || 10000;
