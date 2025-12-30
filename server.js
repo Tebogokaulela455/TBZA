@@ -44,6 +44,24 @@ app.post('/login', async (req, res) => {
     } catch (err) { res.status(500).json({ success: false, error: "Login failed" }); }
 });
 
+// --- ADMIN: GET PENDING STUDENTS ---
+app.get('/admin/pending-students', async (req, res) => {
+    try {
+        const [rows] = await pool.query(`SELECT id, full_name, surname, id_number, role, highest_grade_doc FROM users WHERE role != 'admin'`);
+        res.json(rows);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- ADMIN: UPDATE STUDENT STATUS ---
+app.post('/admin/update-status', async (req, res) => {
+    const { userId, status } = req.body;
+    try {
+        const newRole = status === 'approved' ? 'student' : 'rejected';
+        await pool.query(`UPDATE users SET role = ? WHERE id = ?`, [newRole, userId]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // --- COURSE CREATION (GRADUATES) ---
 app.post('/create-course', async (req, res) => {
     const { title, type, price, creator_id } = req.body;
@@ -56,7 +74,7 @@ app.post('/create-course', async (req, res) => {
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
-// --- AI GENERATOR (ADMIN) ---
+// --- AI GENERATOR (ADMIN) - UPDATED FOR MULTIPLE UNITS ---
 app.post('/generate-ai-course', async (req, res) => {
     const { textbookText, courseType, title } = req.body;
     const connection = await pool.getConnection();
@@ -67,9 +85,28 @@ app.post('/generate-ai-course', async (req, res) => {
             [title, courseType]
         );
         const courseId = course.insertId;
-        const chunk = textbookText.substring(0, 5000); 
-        const [mod] = await connection.query(`INSERT INTO modules (course_id, title, semester) VALUES (?, 'Module 1', 1)`, [courseId]);
-        await connection.query(`INSERT INTO study_units (module_id, title, content) VALUES (?, 'Intro', ?)`, [mod.insertId, chunk]);
+
+        // Split text into 8 chunks to create multiple modules and units
+        const totalUnits = 8;
+        const chunkSize = Math.floor(textbookText.length / totalUnits);
+
+        for (let i = 0; i < 4; i++) { // Create 4 Modules
+            const [mod] = await connection.query(
+                `INSERT INTO modules (course_id, title, semester) VALUES (?, ?, ?)`, 
+                [courseId, `Module ${i + 1}`, (i < 2 ? 1 : 2)]
+            );
+
+            for (let j = 0; j < 2; j++) { // Create 2 Units per Module
+                const index = (i * 2) + j;
+                const start = index * chunkSize;
+                const contentChunk = textbookText.substring(start, start + chunkSize);
+                
+                await connection.query(
+                    `INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`,
+                    [mod.insertId, `Unit ${index + 1}: Core Study Content`, contentChunk]
+                );
+            }
+        }
         
         await connection.commit();
         res.json({ success: true });
@@ -104,7 +141,7 @@ app.get('/available-courses', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- NEW: FETCH COURSE CONTENT FOR STUDENTS ---
+// --- FETCH COURSE CONTENT FOR STUDENTS ---
 app.get('/course-content/:id', async (req, res) => {
     const courseId = req.params.id;
     try {
