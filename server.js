@@ -5,10 +5,12 @@ const cors = require('cors');
 
 const app = express();
 
-// Increased limits to handle large PDF text strings
+// Set high limits for PDF processing
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
 app.use(express.json({ limit: '100mb' }));
-app.use(express.urlencoded({ limit: '100mb', extended: true }));
+
+// --- HEALTH CHECK (To wake up server) ---
+app.get('/health', (req, res) => res.send('Server is Awake!'));
 
 const pool = mysql.createPool({
     host: 'gateway01.eu-central-1.prod.aws.tidbcloud.com',
@@ -25,8 +27,7 @@ const pool = mysql.createPool({
     idleTimeout: 60000 
 });
 
-// --- 1. AUTHENTICATION (Login & Register) ---
-
+// --- AUTHENTICATION ---
 app.post('/register', async (req, res) => {
     const { username, password, role, fullName, surname, idNumber, cellphone, address, docBase64 } = req.body;
     try {
@@ -36,44 +37,24 @@ app.post('/register', async (req, res) => {
             [username, hashedPassword, role, fullName, surname, idNumber, cellphone, address, docBase64]
         );
         res.json({ success: true });
-    } catch (err) { 
-        console.error("Register Error:", err);
-        res.status(500).json({ success: false, message: err.message }); 
-    }
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
     try {
-        // Hardcoded Admin Override
-        if (username === 'admin' && password === 'admin') {
-            return res.json({ success: true, role: 'admin', userId: 0 });
-        }
-
+        if (username === 'admin' && password === 'admin') return res.json({ success: true, role: 'admin', userId: 0 });
         const [rows] = await pool.query('SELECT * FROM users WHERE username = ?', [username]);
         if (rows.length === 0) return res.json({ success: false, message: "User not found" });
-
         const match = await bcrypt.compare(password, rows[0].password);
-        if (match) {
-            res.json({ 
-                success: true, 
-                role: rows[0].role, 
-                userId: rows[0].id,
-                fullName: rows[0].full_name 
-            });
-        } else {
-            res.json({ success: false, message: "Wrong password" });
-        }
-    } catch (err) { 
-        res.status(500).json({ success: false, error: "Login failed server-side" }); 
-    }
+        if (match) res.json({ success: true, role: rows[0].role, userId: rows[0].id });
+        else res.json({ success: false, message: "Wrong password" });
+    } catch (err) { res.status(500).json({ success: false, error: "Login failed" }); }
 });
 
-// --- 2. ADMIN: STUDENT OVERSIGHT ---
-
+// --- ADMIN FEATURES ---
 app.get('/admin/pending-students', async (req, res) => {
     try {
-        // Fetches everyone who isn't an admin for review
         const [rows] = await pool.query(`SELECT id, full_name, surname, id_number, role, highest_grade_doc FROM users WHERE role != 'admin'`);
         res.json(rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
@@ -82,71 +63,53 @@ app.get('/admin/pending-students', async (req, res) => {
 app.post('/admin/update-status', async (req, res) => {
     const { userId, status } = req.body;
     try {
-        // If approved, they become a 'student', otherwise 'rejected'
         const newRole = status === 'approved' ? 'student' : 'rejected';
         await pool.query(`UPDATE users SET role = ? WHERE id = ?`, [newRole, userId]);
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 3. AI GENERATOR (CHAPTER DETECTION) ---
-
+// --- AI GENERATOR (EVERY CHAPTER = ONE UNIT) ---
 app.post('/generate-ai-course', async (req, res) => {
     const { textbookText, courseType, title } = req.body;
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
-
         const [course] = await connection.query(
             `INSERT INTO courses (title, type, is_approved, ai_generated, price, creator_id) VALUES (?, ?, 0, 1, 0, 0)`, 
             [title, courseType]
         );
         const courseId = course.insertId;
 
-        // Smart Regex: Splits text whenever "Chapter" followed by a number is found
-        let chapters = textbookText.split(/Chapter\s?\d+/i).filter(c => c.trim().length > 100);
+        // Splits text into units based on "Chapter" keyword
+        const chapters = textbookText.split(/Chapter\s?\d+/i).filter(c => c.trim().length > 100);
         
-        // Fallback: If no chapters found, split into 8 parts
-        if (chapters.length === 0) {
+        // Default to 8 units if no "Chapter" markers found
+        const finalChapters = chapters.length > 0 ? chapters : [];
+        if (finalChapters.length === 0) {
             const chunkSize = Math.floor(textbookText.length / 8);
-            for(let i=0; i<8; i++) chapters.push(textbookText.substring(i*chunkSize, (i+1)*chunkSize));
+            for(let i=0; i<8; i++) finalChapters.push(textbookText.substring(i*chunkSize, (i+1)*chunkSize));
         }
 
-        for (let i = 0; i < chapters.length; i++) {
-            const moduleNum = Math.floor(i / 3) + 1; // Group 3 chapters per module
-            
-            let [existingMod] = await connection.query(
-                `SELECT id FROM modules WHERE course_id = ? AND title = ?`, 
-                [courseId, `Module ${moduleNum}`]
-            );
-
-            let moduleId;
-            if (existingMod.length === 0) {
-                const [newMod] = await connection.query(
-                    `INSERT INTO modules (course_id, title, semester) VALUES (?, ?, ?)`,
-                    [courseId, `Module ${moduleNum}`, moduleNum > 2 ? 2 : 1]
-                );
+        for (let i = 0; i < finalChapters.length; i++) {
+            const moduleNum = Math.floor(i / 3) + 1;
+            let [existingMod] = await connection.query(`SELECT id FROM modules WHERE course_id = ? AND title = ?`, [courseId, `Module ${moduleNum}`]);
+            let moduleId = existingMod[0]?.id;
+            if (!moduleId) {
+                const [newMod] = await connection.query(`INSERT INTO modules (course_id, title, semester) VALUES (?, ?, ?)`, [courseId, `Module ${moduleNum}`, moduleNum > 2 ? 2 : 1]);
                 moduleId = newMod.insertId;
-            } else {
-                moduleId = existingMod[0].id;
             }
-
-            await connection.query(
-                `INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`,
-                [moduleId, `Study Unit: Chapter ${i + 1}`, chapters[i].substring(0, 25000)]
-            );
+            await connection.query(`INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`, [moduleId, `Study Unit: Chapter ${i + 1}`, finalChapters[i].substring(0, 20000)]);
         }
-        
         await connection.commit();
-        res.json({ success: true, unitsCreated: chapters.length });
+        res.json({ success: true, unitsCreated: finalChapters.length });
     } catch (err) {
         await connection.rollback();
         res.status(500).json({ error: err.message });
     } finally { connection.release(); }
 });
 
-// --- 4. COURSE MANAGEMENT (Shared) ---
-
+// --- SHARED ROUTES ---
 app.get('/all-courses', async (req, res) => {
     try {
         const [rows] = await pool.query(`SELECT * FROM courses ORDER BY id DESC`);
