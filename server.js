@@ -8,12 +8,12 @@ const app = express();
 app.use(express.json({ limit: '50mb' })); 
 app.use(cors());
 
-// --- DATABASE CONNECTION (FULLY UPDATED WITH YOUR CREDENTIALS) ---
+// --- DATABASE CONNECTION ---
 const pool = mysql.createPool({
     host: 'gateway01.eu-central-1.prod.aws.tidbcloud.com', 
     port: 4000,
-    user: '3ELby3yHuXnNY9H.root', // Updated with your prefix
-    password: 'qjpjNtaHckZ1j8XU', // Updated with your password
+    user: '3ELby3yHuXnNY9H.root', 
+    password: 'qjpjNtaHckZ1j8XU', 
     database: 'test',
     ssl: { 
         minVersion: 'TLSv1.2',
@@ -29,7 +29,6 @@ const MERCHANT_KEY = 'wfx9nr9j9cvlm';
 
 // --- 1. SYSTEM ROUTES ---
 
-// Wake-up route
 app.get('/ping', (req, res) => {
     res.status(200).send("Institution Server Awake");
 });
@@ -37,7 +36,6 @@ app.get('/ping', (req, res) => {
 // Registration Route
 app.post('/register', async (req, res) => {
     const { username, password, role, fullName, surname, idNumber, cellphone, address, docBase64 } = req.body;
-    
     try {
         const hashedPassword = await bcrypt.hash(password, 10);
         const [result] = await pool.query(
@@ -52,9 +50,23 @@ app.post('/register', async (req, res) => {
     }
 });
 
-// Login Route
+// Login Route (UPDATED WITH HARDCODED ADMIN OVERRIDE)
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
+
+    // --- ADMIN OVERRIDE START ---
+    // This ignores the database if these exact details are used
+    if (username === 'admin' && password === 'admin') {
+        console.log("Admin logged in via override.");
+        return res.json({ 
+            success: true, 
+            role: 'admin', 
+            userId: 0, 
+            fullName: 'System Administrator' 
+        });
+    }
+    // --- ADMIN OVERRIDE END ---
+
     try {
         const [rows] = await pool.query('SELECT * FROM users WHERE username = ?', [username]);
         if (rows.length === 0) return res.json({ success: false, message: "User not found" });
@@ -86,17 +98,7 @@ app.post('/enroll-module', async (req, res) => {
             `SELECT COUNT(*) as count FROM enrollments WHERE user_id = ? AND YEAR(enrollment_date) = YEAR(CURDATE())`, 
             [userId]
         );
-
-        if (rows[0].count >= 10) return res.json({ success: false, message: "Yearly limit of 10 modules reached." });
-
-        const [semRows] = await pool.query(
-            `SELECT COUNT(*) as count FROM enrollments e JOIN modules m ON e.module_id = m.id
-             WHERE e.user_id = ? AND m.semester = ? AND YEAR(e.enrollment_date) = YEAR(CURDATE())`,
-            [userId, semester]
-        );
-
-        if (semRows[0].count >= 5) return res.json({ success: false, message: "Semester limit of 5 modules reached." });
-
+        if (rows[0].count >= 10) return res.json({ success: false, message: "Yearly limit reached." });
         await pool.query(`INSERT INTO enrollments (user_id, module_id) VALUES (?, ?)`, [userId, moduleId]);
         res.json({ success: true });
     } catch (err) {
@@ -110,21 +112,11 @@ app.post('/generate-ai-course', async (req, res) => {
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
-        const [course] = await connection.query(
-            `INSERT INTO courses (title, type, is_approved, ai_generated) VALUES (?, ?, 1, 1)`, 
-            [title, courseType]
-        );
+        const [course] = await connection.query(`INSERT INTO courses (title, type, is_approved, ai_generated) VALUES (?, ?, 1, 1)`, [title, courseType]);
         const courseId = course.insertId;
-
         for(let i=1; i<=4; i++) {
-            const [mod] = await connection.query(
-                `INSERT INTO modules (course_id, title, semester) VALUES (?, ?, ?)`,
-                [courseId, `AI Module ${i}`, i <= 2 ? 1 : 2]
-            );
-            await connection.query(
-                `INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`,
-                [mod.insertId, `Unit 1`, `Content: ${textbookText.substring(0, 100)}`]
-            );
+            const [mod] = await connection.query(`INSERT INTO modules (course_id, title, semester) VALUES (?, ?, ?)`, [courseId, `AI Module ${i}`, i <= 2 ? 1 : 2]);
+            await connection.query(`INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`, [mod.insertId, `Unit 1`, `Content: ${textbookText.substring(0, 100)}`]);
         }
         await connection.commit();
         res.json({ success: true });
