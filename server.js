@@ -50,9 +50,12 @@ app.post('/login', async (req, res) => {
 app.post('/create-course', async (req, res) => {
     const { title, type, is_approved, ai_generated } = req.body;
     try {
+        // Safety trim to prevent "Data Truncated" errors if database isn't updated yet
+        const safeType = type ? type.substring(0, 50) : "Short Course";
+        
         const [result] = await pool.query(
             `INSERT INTO courses (title, type, is_approved, ai_generated) VALUES (?, ?, ?, ?)`,
-            [title, type, is_approved || 0, ai_generated || 0]
+            [title, safeType, is_approved || 0, ai_generated || 0]
         );
         res.json({ success: true, courseId: result.insertId });
     } catch (err) {
@@ -94,13 +97,16 @@ app.post('/generate-ai-course', async (req, res) => {
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
+        
+        // Safety trim for the 'type' column
+        const safeType = courseType ? courseType.substring(0, 50) : "AI Generated";
+
         const [course] = await connection.query(
             `INSERT INTO courses (title, type, is_approved, ai_generated) VALUES (?, ?, 1, 1)`, 
-            [title, courseType]
+            [title, safeType]
         );
         const courseId = course.insertId;
 
-        // Logic to split textbook text into 4 modules
         const modCount = 4;
         const chunkSize = Math.floor(textbookText.length / modCount);
 
