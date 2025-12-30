@@ -24,34 +24,13 @@ const pool = mysql.createPool({
     enableKeepAlive: true
 });
 
-// --- 1. SYSTEM ROUTES ---
-
-app.get('/ping', (req, res) => res.status(200).send("Institution Server Awake"));
-
-app.post('/login', async (req, res) => {
-    const { username, password } = req.body;
-    if (username === 'admin' && password === 'admin') {
-        return res.json({ success: true, role: 'admin', userId: 0, fullName: 'System Administrator' });
-    }
-    try {
-        const [rows] = await pool.query('SELECT * FROM users WHERE username = ?', [username]);
-        if (rows.length === 0) return res.json({ success: false, message: "User not found" });
-        const match = await bcrypt.compare(password, rows[0].password);
-        if (match) {
-            res.json({ success: true, role: rows[0].role, userId: rows[0].id, fullName: rows[0].full_name });
-        } else {
-            res.json({ success: false, message: "Wrong password" });
-        }
-    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
-});
-
-// --- 2. GRADUATE & MANUAL COURSE ROUTES ---
+// --- GRADUATE & MANUAL COURSE ROUTES ---
 
 app.post('/create-course', async (req, res) => {
     const { title, type, is_approved, ai_generated } = req.body;
     try {
-        // Safety trim to prevent "Data Truncated" errors if database isn't updated yet
-        const safeType = type ? type.substring(0, 50) : "Short Course";
+        // Ensure 'type' doesn't exceed 100 chars to avoid truncation errors
+        const safeType = type ? type.substring(0, 99) : "Short Course";
         
         const [result] = await pool.query(
             `INSERT INTO courses (title, type, is_approved, ai_generated) VALUES (?, ?, ?, ?)`,
@@ -80,7 +59,10 @@ app.post('/add-study-unit', async (req, res) => {
     try {
         await pool.query(`INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`, [moduleId, title, content]);
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+    } catch (err) { 
+        console.error("Add Unit Error:", err.message);
+        res.status(500).json({ success: false, error: err.message }); 
+    }
 });
 
 app.get('/modules/:courseId', async (req, res) => {
@@ -90,7 +72,7 @@ app.get('/modules/:courseId', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 3. AI GENERATOR ROUTE ---
+// --- AI GENERATOR ROUTE (FIXED FOR LARGE CONTENT) ---
 
 app.post('/generate-ai-course', async (req, res) => {
     const { textbookText, courseType, title } = req.body;
@@ -98,8 +80,7 @@ app.post('/generate-ai-course', async (req, res) => {
     try {
         await connection.beginTransaction();
         
-        // Safety trim for the 'type' column
-        const safeType = courseType ? courseType.substring(0, 50) : "AI Generated";
+        const safeType = courseType ? courseType.substring(0, 99) : "AI Generated";
 
         const [course] = await connection.query(
             `INSERT INTO courses (title, type, is_approved, ai_generated) VALUES (?, ?, 1, 1)`, 
@@ -108,19 +89,23 @@ app.post('/generate-ai-course', async (req, res) => {
         const courseId = course.insertId;
 
         const modCount = 4;
-        const chunkSize = Math.floor(textbookText.length / modCount);
+        const totalLength = textbookText.length;
+        const chunkSize = Math.floor(totalLength / modCount);
 
         for(let i = 1; i <= modCount; i++) {
             const sem = (i <= 2) ? 1 : 2;
             const [mod] = await connection.query(
                 `INSERT INTO modules (course_id, title, semester) VALUES (?, ?, ?)`,
-                [courseId, `Module ${i}: ${title} Essentials`, sem]
+                [courseId, `Module ${i}: ${title} Core`, sem]
             );
+            
             const start = (i - 1) * chunkSize;
+            // Use a safe slice of the textbook for this unit
             const content = textbookText.substring(start, start + chunkSize);
+            
             await connection.query(
                 `INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`,
-                [mod.insertId, `Unit 1: Overview`, content]
+                [mod.insertId, `Unit 1: Specialized Knowledge`, content]
             );
         }
         await connection.commit();
@@ -128,8 +113,28 @@ app.post('/generate-ai-course', async (req, res) => {
     } catch (err) {
         await connection.rollback();
         console.error("AI Gen Error:", err.message);
-        res.status(500).json({ success: false, error: err.message });
+        res.status(500).json({ success: false, error: "AI Generation failed: " + err.message });
     } finally { connection.release(); }
+});
+
+// Standard System Routes (Login/Ping)
+app.get('/ping', (req, res) => res.status(200).send("Institution Server Awake"));
+
+app.post('/login', async (req, res) => {
+    const { username, password } = req.body;
+    if (username === 'admin' && password === 'admin') {
+        return res.json({ success: true, role: 'admin', userId: 0, fullName: 'System Administrator' });
+    }
+    try {
+        const [rows] = await pool.query('SELECT * FROM users WHERE username = ?', [username]);
+        if (rows.length === 0) return res.json({ success: false, message: "User not found" });
+        const match = await bcrypt.compare(password, rows[0].password);
+        if (match) {
+            res.json({ success: true, role: rows[0].role, userId: rows[0].id, fullName: rows[0].full_name });
+        } else {
+            res.json({ success: false, message: "Wrong password" });
+        }
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 const PORT = process.env.PORT || 10000;
