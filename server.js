@@ -104,33 +104,34 @@ app.get('/available-courses', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- NEW: DELETE COURSE FEATURE (WITH CASCADE LOGIC) ---
+// --- NEW: FETCH COURSE CONTENT FOR STUDENTS ---
+app.get('/course-content/:id', async (req, res) => {
+    const courseId = req.params.id;
+    try {
+        const [modules] = await pool.query(`SELECT * FROM modules WHERE course_id = ?`, [courseId]);
+        for (let mod of modules) {
+            const [units] = await pool.query(`SELECT * FROM study_units WHERE module_id = ?`, [mod.id]);
+            mod.units = units;
+        }
+        res.json({ success: true, modules });
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// --- DELETE COURSE FEATURE ---
 app.post('/delete-course', async (req, res) => {
     const { courseId } = req.body;
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
-
-        // 1. Delete Study Units belonging to Modules of this course
-        await connection.query(`
-            DELETE FROM study_units 
-            WHERE module_id IN (SELECT id FROM modules WHERE course_id = ?)
-        `, [courseId]);
-
-        // 2. Delete Modules belonging to this course
+        await connection.query(`DELETE FROM study_units WHERE module_id IN (SELECT id FROM modules WHERE course_id = ?)`, [courseId]);
         await connection.query(`DELETE FROM modules WHERE course_id = ?`, [courseId]);
-
-        // 3. Finally, delete the course itself
         await connection.query(`DELETE FROM courses WHERE id = ?`, [courseId]);
-
         await connection.commit();
         res.json({ success: true, message: "Course and all related data deleted." });
     } catch (err) {
         await connection.rollback();
         res.status(500).json({ success: false, error: err.message });
-    } finally {
-        connection.release();
-    }
+    } finally { connection.release(); }
 });
 
 const PORT = process.env.PORT || 10000;
