@@ -15,115 +15,39 @@ const pool = mysql.createPool({
     user: '3ELby3yHuXnNY9H.root', 
     password: 'qjpjNtaHckZ1j8XU', 
     database: 'test',
-    ssl: { 
-        minVersion: 'TLSv1.2',
-        rejectUnauthorized: true 
-    },
+    ssl: { minVersion: 'TLSv1.2', rejectUnauthorized: true },
     connectionLimit: 10,
     connectTimeout: 20000, 
     enableKeepAlive: true
 });
 
-// --- GRADUATE & MANUAL COURSE ROUTES ---
+const MERCHANT_ID = '32880521';
+const MERCHANT_KEY = 'wfx9nr9j9cvlm';
 
-app.post('/create-course', async (req, res) => {
-    const { title, type, is_approved, ai_generated } = req.body;
-    try {
-        // Ensure 'type' doesn't exceed 100 chars to avoid truncation errors
-        const safeType = type ? type.substring(0, 99) : "Short Course";
-        
-        const [result] = await pool.query(
-            `INSERT INTO courses (title, type, is_approved, ai_generated) VALUES (?, ?, ?, ?)`,
-            [title, safeType, is_approved || 0, ai_generated || 0]
-        );
-        res.json({ success: true, courseId: result.insertId });
-    } catch (err) {
-        console.error("SQL Error in create-course:", err.message);
-        res.status(500).json({ success: false, error: err.message });
-    }
-});
+// --- 1. SYSTEM & AUTH ROUTES ---
 
-app.post('/add-module', async (req, res) => {
-    const { courseId, title, semester } = req.body;
-    try {
-        const [result] = await pool.query(
-            `INSERT INTO modules (course_id, title, semester) VALUES (?, ?, ?)`,
-            [courseId, title, semester]
-        );
-        res.json({ success: true, moduleId: result.insertId });
-    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
-});
-
-app.post('/add-study-unit', async (req, res) => {
-    const { moduleId, title, content } = req.body;
-    try {
-        await pool.query(`INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`, [moduleId, title, content]);
-        res.json({ success: true });
-    } catch (err) { 
-        console.error("Add Unit Error:", err.message);
-        res.status(500).json({ success: false, error: err.message }); 
-    }
-});
-
-app.get('/modules/:courseId', async (req, res) => {
-    try {
-        const [rows] = await pool.query(`SELECT * FROM modules WHERE course_id = ?`, [req.params.courseId]);
-        res.json(rows);
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// --- AI GENERATOR ROUTE (FIXED FOR LARGE CONTENT) ---
-
-app.post('/generate-ai-course', async (req, res) => {
-    const { textbookText, courseType, title } = req.body;
-    const connection = await pool.getConnection();
-    try {
-        await connection.beginTransaction();
-        
-        const safeType = courseType ? courseType.substring(0, 99) : "AI Generated";
-
-        const [course] = await connection.query(
-            `INSERT INTO courses (title, type, is_approved, ai_generated) VALUES (?, ?, 1, 1)`, 
-            [title, safeType]
-        );
-        const courseId = course.insertId;
-
-        const modCount = 4;
-        const totalLength = textbookText.length;
-        const chunkSize = Math.floor(totalLength / modCount);
-
-        for(let i = 1; i <= modCount; i++) {
-            const sem = (i <= 2) ? 1 : 2;
-            const [mod] = await connection.query(
-                `INSERT INTO modules (course_id, title, semester) VALUES (?, ?, ?)`,
-                [courseId, `Module ${i}: ${title} Core`, sem]
-            );
-            
-            const start = (i - 1) * chunkSize;
-            // Use a safe slice of the textbook for this unit
-            const content = textbookText.substring(start, start + chunkSize);
-            
-            await connection.query(
-                `INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`,
-                [mod.insertId, `Unit 1: Specialized Knowledge`, content]
-            );
-        }
-        await connection.commit();
-        res.json({ success: true });
-    } catch (err) {
-        await connection.rollback();
-        console.error("AI Gen Error:", err.message);
-        res.status(500).json({ success: false, error: "AI Generation failed: " + err.message });
-    } finally { connection.release(); }
-});
-
-// Standard System Routes (Login/Ping)
 app.get('/ping', (req, res) => res.status(200).send("Institution Server Awake"));
+
+app.post('/register', async (req, res) => {
+    const { username, password, role, fullName, surname, idNumber, cellphone, address, docBase64 } = req.body;
+    try {
+        const hashedPassword = await bcrypt.hash(password, 10);
+        await pool.query(
+            `INSERT INTO users (username, password, role, full_name, surname, id_number, cellphone, address, highest_grade_doc) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [username, hashedPassword, role, fullName, surname, idNumber, cellphone, address, docBase64]
+        );
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Reg Error:", err.message);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
     if (username === 'admin' && password === 'admin') {
-        return res.json({ success: true, role: 'admin', userId: 0, fullName: 'System Administrator' });
+        return res.json({ success: true, role: 'admin', userId: 0, fullName: 'System Admin' });
     }
     try {
         const [rows] = await pool.query('SELECT * FROM users WHERE username = ?', [username]);
@@ -135,6 +59,90 @@ app.post('/login', async (req, res) => {
             res.json({ success: false, message: "Wrong password" });
         }
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// --- 2. STUDENT DASHBOARD & ENROLLMENT ---
+
+app.get('/available-courses', async (req, res) => {
+    try {
+        const [rows] = await pool.query(`SELECT * FROM courses WHERE is_approved = 1 OR ai_generated = 1`);
+        res.json(rows);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/payfast-signature', (req, res) => {
+    const { amount, itemName } = req.body;
+    let pfString = `merchant_id=${MERCHANT_ID}&merchant_key=${MERCHANT_KEY}&amount=${amount}&item_name=${itemName}`;
+    const signature = crypto.createHash('md5').update(pfString).digest('hex');
+    res.json({ signature });
+});
+
+// --- 3. GRADUATE DASHBOARD (MANUAL CREATION) ---
+
+app.post('/create-course', async (req, res) => {
+    const { title, type, is_approved } = req.body;
+    try {
+        const safeType = type ? type.substring(0, 99) : "Short Course";
+        const [result] = await pool.query(
+            `INSERT INTO courses (title, type, is_approved, ai_generated) VALUES (?, ?, ?, 0)`,
+            [title, safeType, is_approved || 0]
+        );
+        res.json({ success: true, courseId: result.insertId });
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.post('/add-module', async (req, res) => {
+    const { courseId, title, semester } = req.body;
+    try {
+        const [result] = await pool.query(
+            `INSERT INTO modules (course_id, title, semester) VALUES (?, ?, ?)`,
+            [courseId, title, semester]
+        );
+        res.json({ success: true, moduleId: result.insertId });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/add-study-unit', async (req, res) => {
+    const { moduleId, title, content } = req.body;
+    try {
+        await pool.query(`INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`, [moduleId, title, content]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- 4. AI COURSE CREATOR ---
+
+app.post('/generate-ai-course', async (req, res) => {
+    const { textbookText, courseType, title } = req.body;
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+        const [course] = await connection.query(
+            `INSERT INTO courses (title, type, is_approved, ai_generated) VALUES (?, ?, 1, 1)`, 
+            [title, courseType]
+        );
+        const courseId = course.insertId;
+        const modCount = 4;
+        const chunkSize = Math.floor(textbookText.length / modCount);
+
+        for(let i = 1; i <= modCount; i++) {
+            const sem = (i <= 2) ? 1 : 2;
+            const [mod] = await connection.query(
+                `INSERT INTO modules (course_id, title, semester) VALUES (?, ?, ?)`,
+                [courseId, `Module ${i}: ${title} Essentials`, sem]
+            );
+            const content = textbookText.substring((i-1)*chunkSize, i*chunkSize);
+            await connection.query(
+                `INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`,
+                [mod.insertId, `Unit 1: Core Material`, content]
+            );
+        }
+        await connection.commit();
+        res.json({ success: true });
+    } catch (err) {
+        await connection.rollback();
+        res.status(500).json({ error: err.message });
+    } finally { connection.release(); }
 });
 
 const PORT = process.env.PORT || 10000;
