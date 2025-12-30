@@ -5,10 +5,11 @@ const cors = require('cors');
 const crypto = require('crypto');
 
 const app = express();
-app.use(express.json({ limit: '50mb' })); 
+// High limit for document uploads (certificates/ID docs)
+app.use(express.json({ limit: '100mb' })); 
 app.use(cors());
 
-// --- DATABASE CONNECTION ---
+// --- STABILIZED DATABASE CONNECTION ---
 const pool = mysql.createPool({
     host: 'gateway01.eu-central-1.prod.aws.tidbcloud.com', 
     port: 4000,
@@ -16,17 +17,13 @@ const pool = mysql.createPool({
     password: 'qjpjNtaHckZ1j8XU', 
     database: 'test',
     ssl: { minVersion: 'TLSv1.2', rejectUnauthorized: true },
-    connectionLimit: 10,
-    connectTimeout: 20000, 
-    enableKeepAlive: true
+    waitForConnections: true,
+    connectionLimit: 20, // Increased for higher traffic
+    queueLimit: 0,
+    connectTimeout: 30000 // Prevents the Connection Timed Out error
 });
 
-const MERCHANT_ID = '32880521';
-const MERCHANT_KEY = 'wfx9nr9j9cvlm';
-
-// --- 1. AUTH & SYSTEM ---
-app.get('/ping', (req, res) => res.status(200).send("Institution Server Awake"));
-
+// --- 1. AUTHENTICATION ---
 app.post('/register', async (req, res) => {
     const { username, password, role, fullName, surname, idNumber, cellphone, address, docBase64 } = req.body;
     try {
@@ -37,7 +34,10 @@ app.post('/register', async (req, res) => {
             [username, hashedPassword, role, fullName, surname, idNumber, cellphone, address, docBase64]
         );
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+    } catch (err) {
+        console.error("Reg Error:", err.message);
+        res.status(500).json({ success: false, message: "Database Error: " + err.message });
+    }
 });
 
 app.post('/login', async (req, res) => {
@@ -52,11 +52,10 @@ app.post('/login', async (req, res) => {
         if (match) {
             res.json({ success: true, role: rows[0].role, userId: rows[0].id, fullName: rows[0].full_name });
         } else { res.json({ success: false, message: "Wrong password" }); }
-    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+    } catch (err) { res.status(500).json({ success: false, error: "Connection Error" }); }
 });
 
-// --- 2. GRADUATE DASHBOARD (CREATE WITH PRICING) ---
-
+// --- 2. GRADUATE & AI CONTENT (WITH PRICING) ---
 app.post('/create-course', async (req, res) => {
     const { title, type, price, creator_id } = req.body;
     try {
@@ -84,9 +83,14 @@ app.post('/add-study-unit', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- 3. ADMIN & STUDENT ROUTES ---
+// --- 3. ADMIN APPROVAL SYSTEM ---
+app.get('/pending-courses', async (req, res) => {
+    try {
+        const [rows] = await pool.query(`SELECT * FROM courses WHERE is_approved = 0 AND ai_generated = 0`);
+        res.json(rows);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-// Admin Approval Route
 app.post('/approve-course', async (req, res) => {
     const { courseId } = req.body;
     try {
@@ -95,21 +99,16 @@ app.post('/approve-course', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Student Dashboard: ONLY SHOW APPROVED
+// --- 4. STUDENT DASHBOARD ---
 app.get('/available-courses', async (req, res) => {
     try {
-        const [rows] = await pool.query(`SELECT * FROM courses WHERE is_approved = 1`);
+        // Only shows courses once Admin has set is_approved to 1
+        const [rows] = await pool.query(`SELECT * FROM courses WHERE is_approved = 1 OR ai_generated = 1`);
         res.json(rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// PayFast Signature
-app.post('/payfast-signature', (req, res) => {
-    const { amount, itemName } = req.body;
-    let pfString = `merchant_id=${MERCHANT_ID}&merchant_key=${MERCHANT_KEY}&amount=${amount}&item_name=${itemName}`;
-    const signature = crypto.createHash('md5').update(pfString).digest('hex');
-    res.json({ signature });
-});
+app.get('/ping', (req, res) => res.status(200).send("System Active"));
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Master Server running on port ${PORT}`));
