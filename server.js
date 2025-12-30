@@ -5,29 +5,34 @@ const cors = require('cors');
 const crypto = require('crypto');
 
 const app = express();
-app.use(express.json({ limit: '50mb' })); // Increased limit for PDF/Image uploads
+app.use(express.json({ limit: '50mb' })); 
 app.use(cors());
 
-// DATABASE CONNECTION
+// --- DATABASE CONNECTION (FIXED FOR TiDB PREFIX ERROR) ---
 const pool = mysql.createPool({
     host: 'gateway01.eu-central-1.prod.aws.tidbcloud.com', 
-    user: 'YOUR_USER', // REMEMBER: Replace with your actual TiDB username
-    password: 'YOUR_PASSWORD', // REMEMBER: Replace with your actual TiDB password
+    // IMPORTANT: Your user MUST look like 'xxxxxx.root' (the prefix is mandatory)
+    user: 'YOUR_PREFIX_HERE.root', 
+    password: 'YOUR_PASSWORD', 
     database: 'test',
-    ssl: { rejectUnauthorized: true }
+    port: 4000,
+    ssl: { 
+        minVersion: 'TLSv1.2',
+        rejectUnauthorized: true 
+    },
+    connectionLimit: 10,
+    enableKeepAlive: true
 });
 
 const MERCHANT_ID = '32880521';
 const MERCHANT_KEY = 'wfx9nr9j9cvlm';
 
-// --- 1. SYSTEM ROUTES (Fixes the 404 Errors) ---
+// --- 1. SYSTEM ROUTES ---
 
-// Wake-up route
 app.get('/ping', (req, res) => {
     res.status(200).send("Institution Server Awake");
 });
 
-// Registration Route
 app.post('/register', async (req, res) => {
     const { username, password, role, fullName, surname, idNumber, cellphone, address, docBase64 } = req.body;
     
@@ -41,11 +46,14 @@ app.post('/register', async (req, res) => {
         res.json({ success: true, userId: result.insertId });
     } catch (err) {
         console.error("Registration Error:", err);
+        // Checking for specific DB connection errors to help you debug
+        if (err.code === 'ER_ACCESS_DENIED_ERROR') {
+             return res.status(500).json({ success: false, message: "Database connection failed: Check username prefix." });
+        }
         res.status(500).json({ success: false, message: "Registration failed. ID or Username might already exist." });
     }
 });
 
-// Login Route
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
     try {
@@ -66,11 +74,12 @@ app.post('/login', async (req, res) => {
             res.json({ success: false, message: "Wrong password" });
         }
     } catch (err) {
-        res.status(500).json({ success: false, message: err.message });
+        console.error("Login Error:", err);
+        res.status(500).json({ success: false, message: "Database Error: " + err.message });
     }
 });
 
-// --- 2. ENROLLMENT LOGIC (10-Module Rule) ---
+// --- 2. ENROLLMENT LOGIC ---
 app.post('/enroll-module', async (req, res) => {
     const { userId, moduleId, semester } = req.body; 
     try {
