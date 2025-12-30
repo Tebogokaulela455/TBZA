@@ -67,7 +67,7 @@ app.post('/generate-ai-course', async (req, res) => {
             [title, courseType]
         );
         const courseId = course.insertId;
-        const chunk = textbookText.substring(0, 5000); // Sample chunk
+        const chunk = textbookText.substring(0, 5000); 
         const [mod] = await connection.query(`INSERT INTO modules (course_id, title, semester) VALUES (?, 'Module 1', 1)`, [courseId]);
         await connection.query(`INSERT INTO study_units (module_id, title, content) VALUES (?, 'Intro', ?)`, [mod.insertId, chunk]);
         
@@ -79,15 +79,15 @@ app.post('/generate-ai-course', async (req, res) => {
     } finally { connection.release(); }
 });
 
-// --- THE FIX: SHARED COURSE MANAGER ROUTE ---
+// --- SHARED COURSE MANAGER ROUTE (ADMIN SEES ALL) ---
 app.get('/all-courses', async (req, res) => {
     try {
-        // Fetching all to ensure AI and Graduate courses appear together
         const [rows] = await pool.query(`SELECT * FROM courses ORDER BY id DESC`);
         res.json(rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// --- APPROVAL ROUTE (THE KEY TO SHOWING COURSES TO STUDENTS) ---
 app.post('/approve-course', async (req, res) => {
     const { courseId } = req.body;
     try {
@@ -96,9 +96,10 @@ app.post('/approve-course', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// --- STUDENT DASHBOARD ROUTE (ONLY SHOWS APPROVED) ---
 app.get('/available-courses', async (req, res) => {
     try {
-        const [rows] = await pool.query(`SELECT * FROM courses WHERE is_approved = 1`);
+        const [rows] = await pool.query(`SELECT * FROM courses WHERE is_approved = 1 ORDER BY id DESC`);
         res.json(rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
