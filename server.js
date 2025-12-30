@@ -16,7 +16,11 @@ const pool = mysql.createPool({
     ssl: { minVersion: 'TLSv1.2', rejectUnauthorized: true },
     waitForConnections: true,
     connectionLimit: 20,
-    connectTimeout: 30000
+    connectTimeout: 30000,
+    // --- ADDED FOR STABILITY ---
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
+    idleTimeout: 60000 
 });
 
 // --- AUTHENTICATION ---
@@ -74,7 +78,7 @@ app.post('/create-course', async (req, res) => {
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
-// --- AI GENERATOR (ADMIN) - UPDATED FOR MULTIPLE UNITS ---
+// --- AI GENERATOR (ADMIN) - UPDATED FOR CHAPTER DETECTION ---
 app.post('/generate-ai-course', async (req, res) => {
     const { textbookText, courseType, title } = req.body;
     const connection = await pool.getConnection();
@@ -86,30 +90,46 @@ app.post('/generate-ai-course', async (req, res) => {
         );
         const courseId = course.insertId;
 
-        // Split text into 8 chunks to create multiple modules and units
-        const totalUnits = 8;
-        const chunkSize = Math.floor(textbookText.length / totalUnits);
+        // Split text by "Chapter" or "CHAPTER"
+        const chapters = textbookText.split(/Chapter\s?\d+/i).filter(c => c.trim().length > 100);
+        
+        // If no "Chapter" markers found, fall back to 8 equal units
+        const finalChapters = chapters.length > 1 ? chapters : [];
+        if (finalChapters.length === 0) {
+            const chunkSize = Math.floor(textbookText.length / 8);
+            for(let i=0; i<8; i++) finalChapters.push(textbookText.substring(i*chunkSize, (i+1)*chunkSize));
+        }
 
-        for (let i = 0; i < 4; i++) { // Create 4 Modules
-            const [mod] = await connection.query(
-                `INSERT INTO modules (course_id, title, semester) VALUES (?, ?, ?)`, 
-                [courseId, `Module ${i + 1}`, (i < 2 ? 1 : 2)]
+        let unitCount = 0;
+        for (let i = 0; i < finalChapters.length; i++) {
+            // Every 3 units, create a new Module
+            const moduleNum = Math.floor(i / 3) + 1;
+            
+            let [existingMod] = await connection.query(
+                `SELECT id FROM modules WHERE course_id = ? AND title = ?`, 
+                [courseId, `Module ${moduleNum}`]
             );
 
-            for (let j = 0; j < 2; j++) { // Create 2 Units per Module
-                const index = (i * 2) + j;
-                const start = index * chunkSize;
-                const contentChunk = textbookText.substring(start, start + chunkSize);
-                
-                await connection.query(
-                    `INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`,
-                    [mod.insertId, `Unit ${index + 1}: Core Study Content`, contentChunk]
+            let moduleId;
+            if (existingMod.length === 0) {
+                const [newMod] = await connection.query(
+                    `INSERT INTO modules (course_id, title, semester) VALUES (?, ?, ?)`,
+                    [courseId, `Module ${moduleNum}`, moduleNum > 2 ? 2 : 1]
                 );
+                moduleId = newMod.insertId;
+            } else {
+                moduleId = existingMod[0].id;
             }
+
+            await connection.query(
+                `INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`,
+                [moduleId, `Study Unit ${i + 1}: Chapter Content`, finalChapters[i].substring(0, 20000)]
+            );
+            unitCount++;
         }
         
         await connection.commit();
-        res.json({ success: true });
+        res.json({ success: true, unitsCreated: unitCount });
     } catch (err) {
         await connection.rollback();
         res.status(500).json({ error: err.message });
