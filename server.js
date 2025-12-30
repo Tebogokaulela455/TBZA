@@ -4,8 +4,11 @@ const bcrypt = require('bcrypt');
 const cors = require('cors');
 
 const app = express();
+
+// Increased limits to handle large PDF text strings
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
 app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
 const pool = mysql.createPool({
     host: 'gateway01.eu-central-1.prod.aws.tidbcloud.com',
@@ -17,13 +20,13 @@ const pool = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 20,
     connectTimeout: 30000,
-    // --- ADDED FOR STABILITY ---
     enableKeepAlive: true,
     keepAliveInitialDelay: 0,
     idleTimeout: 60000 
 });
 
-// --- AUTHENTICATION ---
+// --- 1. AUTHENTICATION (Login & Register) ---
+
 app.post('/register', async (req, res) => {
     const { username, password, role, fullName, surname, idNumber, cellphone, address, docBase64 } = req.body;
     try {
@@ -33,77 +36,84 @@ app.post('/register', async (req, res) => {
             [username, hashedPassword, role, fullName, surname, idNumber, cellphone, address, docBase64]
         );
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+    } catch (err) { 
+        console.error("Register Error:", err);
+        res.status(500).json({ success: false, message: err.message }); 
+    }
 });
 
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
     try {
-        if (username === 'admin' && password === 'admin') return res.json({ success: true, role: 'admin', userId: 0 });
+        // Hardcoded Admin Override
+        if (username === 'admin' && password === 'admin') {
+            return res.json({ success: true, role: 'admin', userId: 0 });
+        }
+
         const [rows] = await pool.query('SELECT * FROM users WHERE username = ?', [username]);
         if (rows.length === 0) return res.json({ success: false, message: "User not found" });
+
         const match = await bcrypt.compare(password, rows[0].password);
-        if (match) res.json({ success: true, role: rows[0].role, userId: rows[0].id });
-        else res.json({ success: false, message: "Wrong password" });
-    } catch (err) { res.status(500).json({ success: false, error: "Login failed" }); }
+        if (match) {
+            res.json({ 
+                success: true, 
+                role: rows[0].role, 
+                userId: rows[0].id,
+                fullName: rows[0].full_name 
+            });
+        } else {
+            res.json({ success: false, message: "Wrong password" });
+        }
+    } catch (err) { 
+        res.status(500).json({ success: false, error: "Login failed server-side" }); 
+    }
 });
 
-// --- ADMIN: GET PENDING STUDENTS ---
+// --- 2. ADMIN: STUDENT OVERSIGHT ---
+
 app.get('/admin/pending-students', async (req, res) => {
     try {
+        // Fetches everyone who isn't an admin for review
         const [rows] = await pool.query(`SELECT id, full_name, surname, id_number, role, highest_grade_doc FROM users WHERE role != 'admin'`);
         res.json(rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- ADMIN: UPDATE STUDENT STATUS ---
 app.post('/admin/update-status', async (req, res) => {
     const { userId, status } = req.body;
     try {
+        // If approved, they become a 'student', otherwise 'rejected'
         const newRole = status === 'approved' ? 'student' : 'rejected';
         await pool.query(`UPDATE users SET role = ? WHERE id = ?`, [newRole, userId]);
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- COURSE CREATION (GRADUATES) ---
-app.post('/create-course', async (req, res) => {
-    const { title, type, price, creator_id } = req.body;
-    try {
-        const [result] = await pool.query(
-            `INSERT INTO courses (title, type, price, creator_id, is_approved, ai_generated) VALUES (?, ?, ?, ?, 0, 0)`,
-            [title, type.substring(0,99), price || 0, creator_id]
-        );
-        res.json({ success: true, courseId: result.insertId });
-    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
-});
+// --- 3. AI GENERATOR (CHAPTER DETECTION) ---
 
-// --- AI GENERATOR (ADMIN) - UPDATED FOR CHAPTER DETECTION ---
 app.post('/generate-ai-course', async (req, res) => {
     const { textbookText, courseType, title } = req.body;
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
+
         const [course] = await connection.query(
             `INSERT INTO courses (title, type, is_approved, ai_generated, price, creator_id) VALUES (?, ?, 0, 1, 0, 0)`, 
             [title, courseType]
         );
         const courseId = course.insertId;
 
-        // Split text by "Chapter" or "CHAPTER"
-        const chapters = textbookText.split(/Chapter\s?\d+/i).filter(c => c.trim().length > 100);
+        // Smart Regex: Splits text whenever "Chapter" followed by a number is found
+        let chapters = textbookText.split(/Chapter\s?\d+/i).filter(c => c.trim().length > 100);
         
-        // If no "Chapter" markers found, fall back to 8 equal units
-        const finalChapters = chapters.length > 1 ? chapters : [];
-        if (finalChapters.length === 0) {
+        // Fallback: If no chapters found, split into 8 parts
+        if (chapters.length === 0) {
             const chunkSize = Math.floor(textbookText.length / 8);
-            for(let i=0; i<8; i++) finalChapters.push(textbookText.substring(i*chunkSize, (i+1)*chunkSize));
+            for(let i=0; i<8; i++) chapters.push(textbookText.substring(i*chunkSize, (i+1)*chunkSize));
         }
 
-        let unitCount = 0;
-        for (let i = 0; i < finalChapters.length; i++) {
-            // Every 3 units, create a new Module
-            const moduleNum = Math.floor(i / 3) + 1;
+        for (let i = 0; i < chapters.length; i++) {
+            const moduleNum = Math.floor(i / 3) + 1; // Group 3 chapters per module
             
             let [existingMod] = await connection.query(
                 `SELECT id FROM modules WHERE course_id = ? AND title = ?`, 
@@ -123,20 +133,20 @@ app.post('/generate-ai-course', async (req, res) => {
 
             await connection.query(
                 `INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`,
-                [moduleId, `Study Unit ${i + 1}: Chapter Content`, finalChapters[i].substring(0, 20000)]
+                [moduleId, `Study Unit: Chapter ${i + 1}`, chapters[i].substring(0, 25000)]
             );
-            unitCount++;
         }
         
         await connection.commit();
-        res.json({ success: true, unitsCreated: unitCount });
+        res.json({ success: true, unitsCreated: chapters.length });
     } catch (err) {
         await connection.rollback();
         res.status(500).json({ error: err.message });
     } finally { connection.release(); }
 });
 
-// --- SHARED COURSE MANAGER ROUTE (ADMIN SEES ALL) ---
+// --- 4. COURSE MANAGEMENT (Shared) ---
+
 app.get('/all-courses', async (req, res) => {
     try {
         const [rows] = await pool.query(`SELECT * FROM courses ORDER BY id DESC`);
@@ -144,7 +154,6 @@ app.get('/all-courses', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- APPROVAL ROUTE ---
 app.post('/approve-course', async (req, res) => {
     const { courseId } = req.body;
     try {
@@ -153,7 +162,6 @@ app.post('/approve-course', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- STUDENT DASHBOARD ROUTE ---
 app.get('/available-courses', async (req, res) => {
     try {
         const [rows] = await pool.query(`SELECT * FROM courses WHERE is_approved = 1 ORDER BY id DESC`);
@@ -161,7 +169,6 @@ app.get('/available-courses', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- FETCH COURSE CONTENT FOR STUDENTS ---
 app.get('/course-content/:id', async (req, res) => {
     const courseId = req.params.id;
     try {
@@ -174,7 +181,6 @@ app.get('/course-content/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
-// --- DELETE COURSE FEATURE ---
 app.post('/delete-course', async (req, res) => {
     const { courseId } = req.body;
     const connection = await pool.getConnection();
@@ -184,7 +190,7 @@ app.post('/delete-course', async (req, res) => {
         await connection.query(`DELETE FROM modules WHERE course_id = ?`, [courseId]);
         await connection.query(`DELETE FROM courses WHERE id = ?`, [courseId]);
         await connection.commit();
-        res.json({ success: true, message: "Course and all related data deleted." });
+        res.json({ success: true });
     } catch (err) {
         await connection.rollback();
         res.status(500).json({ success: false, error: err.message });
@@ -192,4 +198,4 @@ app.post('/delete-course', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Server live on ${PORT}`));
+app.listen(PORT, () => console.log(`Master Server running on ${PORT}`));
