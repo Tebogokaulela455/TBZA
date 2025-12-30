@@ -8,19 +8,19 @@ const app = express();
 app.use(express.json({ limit: '50mb' })); 
 app.use(cors());
 
-// --- DATABASE CONNECTION (FIXED FOR TiDB PREFIX ERROR) ---
+// --- DATABASE CONNECTION (FULLY UPDATED WITH YOUR CREDENTIALS) ---
 const pool = mysql.createPool({
     host: 'gateway01.eu-central-1.prod.aws.tidbcloud.com', 
-    // IMPORTANT: Your user MUST look like 'xxxxxx.root' (the prefix is mandatory)
-    user: 'YOUR_PREFIX_HERE.root', 
-    password: 'YOUR_PASSWORD', 
-    database: 'test',
     port: 4000,
+    user: '3ELby3yHuXnNY9H.root', // Updated with your prefix
+    password: 'qjpjNtaHckZ1j8XU', // Updated with your password
+    database: 'test',
     ssl: { 
         minVersion: 'TLSv1.2',
         rejectUnauthorized: true 
     },
     connectionLimit: 10,
+    connectTimeout: 20000, 
     enableKeepAlive: true
 });
 
@@ -29,10 +29,12 @@ const MERCHANT_KEY = 'wfx9nr9j9cvlm';
 
 // --- 1. SYSTEM ROUTES ---
 
+// Wake-up route
 app.get('/ping', (req, res) => {
     res.status(200).send("Institution Server Awake");
 });
 
+// Registration Route
 app.post('/register', async (req, res) => {
     const { username, password, role, fullName, surname, idNumber, cellphone, address, docBase64 } = req.body;
     
@@ -46,14 +48,11 @@ app.post('/register', async (req, res) => {
         res.json({ success: true, userId: result.insertId });
     } catch (err) {
         console.error("Registration Error:", err);
-        // Checking for specific DB connection errors to help you debug
-        if (err.code === 'ER_ACCESS_DENIED_ERROR') {
-             return res.status(500).json({ success: false, message: "Database connection failed: Check username prefix." });
-        }
-        res.status(500).json({ success: false, message: "Registration failed. ID or Username might already exist." });
+        res.status(500).json({ success: false, message: "Registration failed. " + err.message });
     }
 });
 
+// Login Route
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
     try {
@@ -137,7 +136,7 @@ app.post('/generate-ai-course', async (req, res) => {
     }
 });
 
-// --- 4. PAYFAST ---
+// --- 4. PAYFAST SIGNATURE ---
 app.post('/payfast-signature', (req, res) => {
     const { amount, itemName } = req.body;
     let pfString = `merchant_id=${MERCHANT_ID}&merchant_key=${MERCHANT_KEY}&amount=${amount}&item_name=${itemName}`;
