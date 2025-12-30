@@ -4,12 +4,10 @@ const bcrypt = require('bcrypt');
 const cors = require('cors');
 
 const app = express();
-
-// Set high limits to prevent "Payload Too Large" during registration or AI generation
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
 app.use(express.json({ limit: '100mb' }));
 
-// --- NEW: HEALTH CHECK (To wake up Render server) ---
+// --- NEW: WAKE UP ROUTE ---
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
 const pool = mysql.createPool({
@@ -43,36 +41,16 @@ app.post('/register', async (req, res) => {
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
     try {
-        // Direct Admin access override
         if (username === 'admin' && password === 'admin') return res.json({ success: true, role: 'admin', userId: 0 });
-        
         const [rows] = await pool.query('SELECT * FROM users WHERE username = ?', [username]);
         if (rows.length === 0) return res.json({ success: false, message: "User not found" });
-        
         const match = await bcrypt.compare(password, rows[0].password);
         if (match) res.json({ success: true, role: rows[0].role, userId: rows[0].id });
         else res.json({ success: false, message: "Wrong password" });
     } catch (err) { res.status(500).json({ success: false, error: "Login failed" }); }
 });
 
-// --- ADMIN FEATURES ---
-app.get('/admin/pending-students', async (req, res) => {
-    try {
-        const [rows] = await pool.query(`SELECT id, full_name, surname, id_number, role, highest_grade_doc FROM users WHERE role != 'admin'`);
-        res.json(rows);
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/admin/update-status', async (req, res) => {
-    const { userId, status } = req.body;
-    try {
-        const newRole = status === 'approved' ? 'student' : 'rejected';
-        await pool.query(`UPDATE users SET role = ? WHERE id = ?`, [newRole, userId]);
-        res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// --- AI CHAPTER-BASED GENERATOR ---
+// --- AI GENERATOR (CHAPTER DETECTION) ---
 app.post('/generate-ai-course', async (req, res) => {
     const { textbookText, courseType, title } = req.body;
     const connection = await pool.getConnection();
@@ -84,10 +62,7 @@ app.post('/generate-ai-course', async (req, res) => {
         );
         const courseId = course.insertId;
 
-        // Split text by "Chapter" keyword (Smart detection)
         const chapters = textbookText.split(/Chapter\s?\d+/i).filter(c => c.trim().length > 100);
-        
-        // Fallback: If no chapters found, split into 8 chunks
         const finalChapters = chapters.length > 0 ? chapters : [];
         if (finalChapters.length === 0) {
             const chunkSize = Math.floor(textbookText.length / 8);
@@ -98,23 +73,21 @@ app.post('/generate-ai-course', async (req, res) => {
             const moduleNum = Math.floor(i / 3) + 1;
             let [existingMod] = await connection.query(`SELECT id FROM modules WHERE course_id = ? AND title = ?`, [courseId, `Module ${moduleNum}`]);
             let moduleId = existingMod[0]?.id;
-            
             if (!moduleId) {
                 const [newMod] = await connection.query(`INSERT INTO modules (course_id, title, semester) VALUES (?, ?, ?)`, [courseId, `Module ${moduleNum}`, moduleNum > 2 ? 2 : 1]);
                 moduleId = newMod.insertId;
             }
-            
             await connection.query(`INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`, [moduleId, `Study Unit: Chapter ${i + 1}`, finalChapters[i].substring(0, 20000)]);
         }
         await connection.commit();
-        res.json({ success: true, unitsCreated: finalChapters.length });
+        res.json({ success: true, unitsCreated: finalChapters.length, courseId: courseId });
     } catch (err) {
         await connection.rollback();
         res.status(500).json({ error: err.message });
     } finally { connection.release(); }
 });
 
-// --- COURSE MANAGEMENT ---
+// --- SHARED ROUTES ---
 app.get('/all-courses', async (req, res) => {
     try {
         const [rows] = await pool.query(`SELECT * FROM courses ORDER BY id DESC`);
@@ -135,6 +108,25 @@ app.get('/available-courses', async (req, res) => {
         const [rows] = await pool.query(`SELECT * FROM courses WHERE is_approved = 1 ORDER BY id DESC`);
         res.json(rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- ENSURE THIS ROUTE IS EXACTLY LIKE THIS ---
+app.get('/course-content/:id', async (req, res) => {
+    const courseId = req.params.id;
+    try {
+        // ADDED: Explicit check for course existence to prevent empty 404s
+        const [courseRows] = await pool.query(`SELECT * FROM courses WHERE id = ?`, [courseId]);
+        if (courseRows.length === 0) {
+            return res.status(404).json({ success: false, error: "Course not found in database" });
+        }
+
+        const [modules] = await pool.query(`SELECT * FROM modules WHERE course_id = ?`, [courseId]);
+        for (let mod of modules) {
+            const [units] = await pool.query(`SELECT * FROM study_units WHERE module_id = ?`, [mod.id]);
+            mod.units = units;
+        }
+        res.json({ success: true, modules });
+    } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 app.post('/delete-course', async (req, res) => {
