@@ -5,7 +5,6 @@ const cors = require('cors');
 const crypto = require('crypto');
 
 const app = express();
-// Increased limit to 50mb to handle large textbook uploads
 app.use(express.json({ limit: '50mb' })); 
 app.use(cors());
 
@@ -34,7 +33,6 @@ app.get('/ping', (req, res) => {
     res.status(200).send("Institution Server Awake");
 });
 
-// Registration Route
 app.post('/register', async (req, res) => {
     const { username, password, role, fullName, surname, idNumber, cellphone, address, docBase64 } = req.body;
     try {
@@ -51,33 +49,18 @@ app.post('/register', async (req, res) => {
     }
 });
 
-// Login Route
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
-
     if (username === 'admin' && password === 'admin') {
-        return res.json({ 
-            success: true, 
-            role: 'admin', 
-            userId: 0, 
-            fullName: 'System Administrator' 
-        });
+        return res.json({ success: true, role: 'admin', userId: 0, fullName: 'System Administrator' });
     }
-
     try {
         const [rows] = await pool.query('SELECT * FROM users WHERE username = ?', [username]);
         if (rows.length === 0) return res.json({ success: false, message: "User not found" });
-
         const user = rows[0];
         const match = await bcrypt.compare(password, user.password);
-        
         if (match) {
-            res.json({ 
-                success: true, 
-                role: user.role, 
-                userId: user.id, 
-                fullName: user.full_name 
-            });
+            res.json({ success: true, role: user.role, userId: user.id, fullName: user.full_name });
         } else {
             res.json({ success: false, message: "Wrong password" });
         }
@@ -88,7 +71,6 @@ app.post('/login', async (req, res) => {
 
 // --- 2. GRADUATE & MANUAL COURSE CREATION ---
 
-// Step 1: Create Course Draft
 app.post('/create-course', async (req, res) => {
     const { title, type, is_approved, ai_generated } = req.body;
     try {
@@ -98,11 +80,11 @@ app.post('/create-course', async (req, res) => {
         );
         res.json({ success: true, courseId: result.insertId });
     } catch (err) {
+        console.error("Create Course Error:", err.message);
         res.status(500).json({ success: false, error: err.message });
     }
 });
 
-// Step 2: Add Module
 app.post('/add-module', async (req, res) => {
     const { courseId, title, semester } = req.body;
     try {
@@ -116,7 +98,6 @@ app.post('/add-module', async (req, res) => {
     }
 });
 
-// Step 3: Add Study Unit
 app.post('/add-study-unit', async (req, res) => {
     const { moduleId, title, content } = req.body;
     try {
@@ -130,7 +111,6 @@ app.post('/add-study-unit', async (req, res) => {
     }
 });
 
-// Helper: Get Modules for a specific course (For the Unit-to-Module mapping)
 app.get('/modules/:courseId', async (req, res) => {
     try {
         const [rows] = await pool.query(`SELECT * FROM modules WHERE course_id = ?`, [req.params.courseId]);
@@ -140,50 +120,57 @@ app.get('/modules/:courseId', async (req, res) => {
     }
 });
 
-// --- 3. AI COURSE GENERATION ---
+// --- 3. AI COURSE GENERATION (UPDATED) ---
 
 app.post('/generate-ai-course', async (req, res) => {
     const { textbookText, courseType, title } = req.body;
+    
+    if (!textbookText || !title) {
+        return res.status(400).json({ success: false, error: "Missing textbook data or title" });
+    }
+
     const connection = await pool.getConnection();
     
-    // Logic to determine module density
     let modCount = 4;
     if (courseType === "Short Course") modCount = 2;
-    if (courseType.includes("Degree") || courseType === "Diploma") modCount = 10;
+    if (courseType.includes("Degree") || courseType === "Diploma") modCount = 8;
 
     try {
         await connection.beginTransaction();
         
-        // Create Course
-        const [course] = await connection.query(
+        // 1. Create Course
+        const [courseResult] = await connection.query(
             `INSERT INTO courses (title, type, is_approved, ai_generated) VALUES (?, ?, 1, 1)`, 
             [title, courseType]
         );
-        const courseId = course.insertId;
+        const courseId = courseResult.insertId;
 
-        // Create Modules & Units based on textbook chunking
+        // 2. Split textbook into chunks for modules
+        const textLength = textbookText.length;
+        const chunkSize = Math.floor(textLength / modCount);
+
         for(let i = 1; i <= modCount; i++) {
             const semester = (i <= modCount/2) ? 1 : 2;
-            const [mod] = await connection.query(
+            const [modResult] = await connection.query(
                 `INSERT INTO modules (course_id, title, semester) VALUES (?, ?, ?)`,
-                [courseId, `Module ${i}: ${title} Core`, semester]
+                [courseId, `Module ${i}: ${title} Specialized Study`, semester]
             );
 
-            // Give each module a chunk of the text
-            const start = (i - 1) * 1000;
-            const chunk = textbookText.substring(start, start + 1000) || "Reference content under review.";
+            const start = (i - 1) * chunkSize;
+            const contentChunk = textbookText.substring(start, start + chunkSize) || "Supplemental material pending.";
 
             await connection.query(
                 `INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`,
-                [mod.insertId, `Study Unit 1: Foundations`, chunk]
+                [modResult.insertId, `Study Unit 1: Technical Foundations`, contentChunk]
             );
         }
 
         await connection.commit();
-        res.json({ success: true });
+        res.json({ success: true, courseId: courseId });
     } catch (err) {
         await connection.rollback();
-        res.status(500).json({ error: err.message });
+        console.error("AI Generation Error:", err.message);
+        res.status(500).json({ success: false, error: err.message });
     } finally {
         connection.release();
     }
