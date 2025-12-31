@@ -19,7 +19,7 @@ const pool = mysql.createPool({
     connectTimeout: 30000
 });
 
-// --- AUTHENTICATION & APPROVAL ---
+// --- AUTHENTICATION ---
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
     try {
@@ -27,7 +27,6 @@ app.post('/login', async (req, res) => {
         if (rows.length === 0) return res.status(401).json({ error: "User not found" });
 
         const user = rows[0];
-        // Check if student is approved
         if (user.role === 'student' && user.status !== 'approved') {
             return res.status(403).json({ error: "Account pending admin approval." });
         }
@@ -41,7 +40,7 @@ app.post('/login', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- AI & GRADUATE COURSE GENERATION ---
+// --- COURSE GENERATION ---
 app.post('/generate-ai-course', async (req, res) => {
     const { title, courseType, price, textbookText, creatorId } = req.body;
     const connection = await pool.getConnection();
@@ -53,7 +52,6 @@ app.post('/generate-ai-course', async (req, res) => {
         );
         const courseId = course.insertId;
 
-        // Dynamic Chapter Logic: Create 1 module/unit per "Chapter" detected
         if (textbookText && textbookText !== "Manual Content") {
             const chapters = textbookText.split(/Chapter\s?\d+/i).filter(c => c.trim().length > 10);
             for (let i = 0; i < chapters.length; i++) {
@@ -70,13 +68,31 @@ app.post('/generate-ai-course', async (req, res) => {
     } finally { connection.release(); }
 });
 
+// --- SAFE FETCH FOR STUDENT DASHBOARD (Fixes 500 error) ---
 app.get('/all-courses', async (req, res) => {
     try {
         const [rows] = await pool.query(`
-            SELECT c.*, u.fullName, u.surname, u.cellphone 
-            FROM courses c LEFT JOIN users u ON c.creator_id = u.id
+            SELECT c.id, c.title, c.type, c.price, c.is_approved 
+            FROM courses c 
+            WHERE c.is_approved = 1
         `);
         res.json(rows);
+    } catch (err) { 
+        res.status(500).json({ error: "Database error fetching courses" }); 
+    }
+});
+
+// --- EXAM QUESTIONS ENDPOINT ---
+app.post('/save-exam-questions', async (req, res) => {
+    const { courseId, questions } = req.body;
+    try {
+        for (let q of questions) {
+            await pool.query(
+                `INSERT INTO exam_questions (course_id, question_text, options, correct_option) VALUES (?, ?, ?, ?)`,
+                [courseId, q.question, q.options, q.correct]
+            );
+        }
+        res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
