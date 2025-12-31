@@ -19,19 +19,22 @@ const pool = mysql.createPool({
     connectTimeout: 30000
 });
 
-// --- AUTHENTICATION ---
+// --- FIXED LOGIN (Admin: admin/admin) ---
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
+    
+    // Admin Override
+    if (username === 'admin' && password === 'admin') {
+        return res.json({ success: true, role: 'admin', userId: 999 });
+    }
+
     try {
         const [rows] = await pool.query(`SELECT * FROM users WHERE username = ?`, [username]);
         if (rows.length === 0) return res.status(401).json({ error: "User not found" });
 
         const user = rows[0];
-        if (user.role === 'student' && user.status !== 'approved') {
-            return res.status(403).json({ error: "Account pending admin approval." });
-        }
-
         const match = await bcrypt.compare(password, user.password);
+        
         if (match) {
             res.json({ success: true, role: user.role, userId: user.id });
         } else {
@@ -40,49 +43,28 @@ app.post('/login', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- COURSE GENERATION ---
-app.post('/generate-ai-course', async (req, res) => {
-    const { title, courseType, price, textbookText, creatorId } = req.body;
+// --- GRADUATE DASHBOARD FIX: SAVE MANUAL CONTENT ---
+app.post('/save-manual-content', async (req, res) => {
+    const { courseId, modules } = req.body;
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
-        const [course] = await connection.query(
-            `INSERT INTO courses (title, type, is_approved, ai_generated, price, creator_id) VALUES (?, ?, 0, ?, ?, ?)`,
-            [title, courseType, creatorId ? 0 : 1, price || 0, creatorId || 0]
-        );
-        const courseId = course.insertId;
-
-        if (textbookText && textbookText !== "Manual Content") {
-            const chapters = textbookText.split(/Chapter\s?\d+/i).filter(c => c.trim().length > 10);
-            for (let i = 0; i < chapters.length; i++) {
-                const [mod] = await connection.query(`INSERT INTO modules (course_id, title) VALUES (?, ?)`, [courseId, `Module ${i+1}`]);
-                await connection.query(`INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`, [mod.insertId, `Unit ${i+1}`, chapters[i].trim()]);
+        for (let mod of modules) {
+            const [mRes] = await connection.query(`INSERT INTO modules (course_id, title) VALUES (?, ?)`, [courseId, mod.title]);
+            const moduleId = mRes.insertId;
+            for (let unit of mod.units) {
+                await connection.query(`INSERT INTO study_units (module_id, title, content) VALUES (?, ?, ?)`, [moduleId, unit.title, unit.content]);
             }
         }
-
         await connection.commit();
-        res.json({ success: true, courseId });
+        res.json({ success: true });
     } catch (err) {
         await connection.rollback();
         res.status(500).json({ error: err.message });
     } finally { connection.release(); }
 });
 
-// --- SAFE FETCH FOR STUDENT DASHBOARD (Fixes 500 error) ---
-app.get('/all-courses', async (req, res) => {
-    try {
-        const [rows] = await pool.query(`
-            SELECT c.id, c.title, c.type, c.price, c.is_approved 
-            FROM courses c 
-            WHERE c.is_approved = 1
-        `);
-        res.json(rows);
-    } catch (err) { 
-        res.status(500).json({ error: "Database error fetching courses" }); 
-    }
-});
-
-// --- EXAM QUESTIONS ENDPOINT ---
+// --- EXAM QUESTIONS ---
 app.post('/save-exam-questions', async (req, res) => {
     const { courseId, questions } = req.body;
     try {
@@ -96,5 +78,24 @@ app.post('/save-exam-questions', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// --- START COURSE (Initial Step) ---
+app.post('/generate-ai-course', async (req, res) => {
+    const { title, courseType, price, creatorId } = req.body;
+    try {
+        const [course] = await pool.query(
+            `INSERT INTO courses (title, type, is_approved, ai_generated, price, creator_id) VALUES (?, ?, 0, 0, ?, ?)`,
+            [title, courseType, price || 0, creatorId || 0]
+        );
+        res.json({ success: true, courseId: course.insertId });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// --- LIST COURSES ---
+app.get('/all-courses', async (req, res) => {
+    try {
+        const [rows] = await pool.query(`SELECT * FROM courses`);
+        res.json(rows);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.listen(3000, () => console.log('Server running on 3000'));
