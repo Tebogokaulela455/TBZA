@@ -79,6 +79,19 @@ app.post('/save-exam-questions', async (req, res) => {
 });
 
 // --- START COURSE (Initial Step) ---
+
+
+// Add this route to your server.js file
+app.post('/approve-course', async (req, res) => {
+    const { courseId } = req.body;
+    try {
+        await pool.query('UPDATE courses SET is_approved = 1 WHERE id = ?', [courseId]);
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Approval Error:", err);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
 app.post('/generate-ai-course', async (req, res) => {
     const { title, courseType, price, creatorId } = req.body;
     try {
