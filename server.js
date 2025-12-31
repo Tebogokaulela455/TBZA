@@ -81,6 +81,47 @@ app.post('/save-exam-questions', async (req, res) => {
 // --- START COURSE (Initial Step) ---
 
 
+// --- PLACE THIS IN YOUR server.js ---
+app.post('/delete-course', async (req, res) => {
+    const { courseId } = req.body;
+    
+    if (!courseId) {
+        return res.status(400).json({ success: false, error: "Course ID is required" });
+    }
+
+    const connection = await pool.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // 1. Delete study units belonging to the course's modules
+        await connection.query(
+            `DELETE FROM study_units WHERE module_id IN (SELECT id FROM modules WHERE course_id = ?)`, 
+            [courseId]
+        );
+
+        // 2. Delete modules belonging to the course
+        await connection.query(`DELETE FROM modules WHERE course_id = ?`, [courseId]);
+
+        // 3. Delete the course itself
+        const [result] = await connection.query(`DELETE FROM courses WHERE id = ?`, [courseId]);
+
+        await connection.commit();
+        
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ success: false, error: "Course not found" });
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        await connection.rollback();
+        console.error("Delete Error:", err);
+        res.status(500).json({ success: false, error: err.message });
+    } finally {
+        connection.release();
+    }
+});
+
+
 // Add this route to your server.js file
 app.post('/approve-course', async (req, res) => {
     const { courseId } = req.body;
